@@ -1,0 +1,46 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.env/
+
+# IDE & Editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs & temporary files
+logs/
+*.log
+.tmp/
+
+# Build & Installer artifacts
+build/
+dist/
+Output/
+*.spec.bak
+
+# Test execution outputs and generated reports
+Test_*/
+*.pdf
+*.xlsx
+!sample_data/**
+
+# Machine-specific runtime configurations
+.env
+home_config.json
+settings.json

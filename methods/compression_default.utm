@@ -1,0 +1,54 @@
+{
+  "format_version": 1,
+  "name": "Compression Default",
+  "author": "",
+  "created": "2026-01-01T00:00:00",
+  "gauge_length_mm": 20.0,
+  "global_limits": {
+    "force_upper_n": 5000.0,
+    "force_lower_n": -5000.0,
+    "disp_upper_mm": 5.0,
+    "disp_lower_mm": -25.0
+  },
+  "phases": [
+    {
+      "name": "Preload",
+      "control_mode": "force",
+      "target": -10.0,
+      "rate": 5.0,
+      "hold_time_s": 0.0,
+      "auto_zero_on_complete": true,
+      "exit_condition": {
+        "type": "force_reached",
+        "target": -10.0,
+        "tolerance": 1.0,
+        "persist_samples": 10
+      }
+    },
+    {
+      "name": "Compression Ramp",
+      "control_mode": "displacement",
+      "target": -20.0,
+      "rate": 2.0,
+      "hold_time_s": 0.0,
+      "auto_zero_on_complete": false,
+      "exit_condition": {
+        "type": "break_detected",
+        "drop_threshold_n": 300.0,
+        "persist_samples": 5
+      }
+    },
+    {
+      "name": "Return to Home",
+      "control_mode": "displacement",
+      "target": 0.0,
+      "rate": 20.0,
+      "hold_time_s": 0.0,
+      "auto_zero_on_complete": false,
+      "exit_condition": {
+        "type": "position_reached",
+        "tolerance": 0.1
+      }
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "motor": {
+    "max_rpm": 1500,
+    "min_rpm": -1500
+  },
+  "load_cell": {
+    "capacity_n": 491.0,
+    "min_n": 0.0
+  },
+  "displacement": {
+    "upper_limit_mm": 25.0,
+    "lower_limit_mm": -1.0
+  },
+  "crosshead": {
+    "max_speed_mm_per_sec": 50.0,
+    "default_return_speed_mm_per_sec": 5.0
+  }
+}
