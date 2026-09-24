@@ -1,1 +1,37 @@
-{"load_position": 0, "unload_position": null}
+{
+  "load_positions": [
+    {
+      "id": "pos_1790227370299",
+      "name": "1000 N",
+      "pulses": 0,
+      "mm": 0.0
+    },
+    {
+      "id": "pos_1790227383068",
+      "name": "2000 N",
+      "pulses": 0,
+      "mm": 0.0
+    },
+    {
+      "id": "pos_1790227385128",
+      "name": "3000 N",
+      "pulses": 0,
+      "mm": 0.0
+    },
+    {
+      "id": "pos_1790228440113",
+      "name": "4000 N",
+      "pulses": 0,
+      "mm": 0.0
+    },
+    {
+      "id": "pos_1790228441628",
+      "name": "5000 N",
+      "pulses": 0,
+      "mm": 0.0
+    }
+  ],
+  "selected_load_id": "pos_1790227383068",
+  "unload_position": 0,
+  "load_position": 0
+}

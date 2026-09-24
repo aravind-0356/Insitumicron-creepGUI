@@ -145,8 +145,32 @@ class CreepAnalysisEngine:
             time_arr = time_arr - time_arr[0]
 
         time_hr = time_arr / 3600.0
+
+        # If load is negative (compressive test), convert to positive magnitude for stress calculation
+        if len(load_arr) > 0 and np.mean(load_arr) < 0:
+            load_arr = np.abs(load_arr)
+
+        # 1. Baseline zeroing: ensure displacement starts cleanly at 0.0
+        disp_rel = disp_arr - disp_arr[0]
+
+        # 2. Robust direction check: compare the end of the test with the start
+        # Use median of the final 5% of points to be immune to single-point rupture recoil/noise
+        tail_pts = max(3, len(disp_rel) // 20)
+        net_trend = float(np.median(disp_rel[-tail_pts:]))
+
+        if net_trend < -1e-4:
+            # Movement progressed in the negative direction (compression or stroke polarity)
+            disp_rel = -disp_rel
+            result.warnings.append(
+                "Displacement progressed in negative direction (compression or stroke polarity). "
+                "Magnitude converted to positive creep strain convention."
+            )
+
+        # 3. Clean noise floor: guarantee every point is Y >= 0 (clamps any minor initial seating dips)
+        disp_rel = np.maximum(0.0, disp_rel)
+
         # Strain as percentage: (disp / L0) * 100
-        strain_pct = (disp_arr / gauge_length_mm) * 100.0
+        strain_pct = (disp_rel / gauge_length_mm) * 100.0
         stress_mpa = load_arr / area_mm2
 
         result.time_s = time_arr.tolist()

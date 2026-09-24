@@ -462,14 +462,10 @@ class InsituMicronGUI(QMainWindow):
 
         # Preset Position Controller
         self.preset_ctrl = PresetPositionController(self.serial_handler, self.uni_control, self)
-        self.uni_control.set_load_pos.connect(self.preset_ctrl.set_load_pos)
+        self.uni_control.controller = self.preset_ctrl
         self.uni_control.set_unload_pos.connect(self.preset_ctrl.set_unload_pos)
-        self.uni_control.clear_load_pos.connect(self.preset_ctrl.clear_load_pos)
         self.uni_control.clear_unload_pos.connect(self.preset_ctrl.clear_unload_pos)
         
-        # We need a lambda to capture the rpm and target type correctly, 
-        # or we could connect directly if the signal signature matches.
-        # But wait, go_load_pos emits (int). start_travel_to takes (target_type, rpm).
         self.uni_control.go_load_pos.connect(lambda rpm: self.preset_ctrl.start_travel_to("load", rpm))
         self.uni_control.go_unload_pos.connect(lambda rpm: self.preset_ctrl.start_travel_to("unload", rpm))
         self.uni_control.cancel_travel.connect(self.preset_ctrl.stop_travel)

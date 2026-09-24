@@ -343,11 +343,17 @@ class DataWorker(QObject):
                 recorded = self.record_snapshot()
                 # Re-read rate each time (user may change it mid-test)
                 interval_s = 3600.0 / max(1, self._sampling_rate)
+                
                 if recorded:
-                    next_sample_time = now + interval_s
+                    next_sample_time += interval_s
+                    # Prevent rapid-fire catchup if we fell far behind (e.g. system sleep)
+                    if next_sample_time < now:
+                        next_sample_time = now + interval_s
                 else:
                     # Could not record (disconnected / no data yet). Retry in 0.1s.
-                    next_sample_time = now + 0.1
+                    next_sample_time += 0.1
+                    if next_sample_time < now:
+                        next_sample_time = now + 0.1
 
             # Sleep in small slices for responsive stopping
             sleep_duration = min(0.1, max(0.01, next_sample_time - time.time()))

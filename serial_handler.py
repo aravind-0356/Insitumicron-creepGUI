@@ -22,6 +22,7 @@ class SerialHandler(QObject):
         self.running = False
         self._is_connected_status = False
         self._write_lock = threading.Lock()
+        self._reconnect_lock = threading.Lock()
         
         self.reconnecting = False
         self.last_port = None
@@ -144,19 +145,22 @@ class SerialHandler(QObject):
         logger.info("read_loop STOPPED.")
 
     def trigger_reconnect(self):
-        if self.reconnecting:
-            return
-        self.reconnecting = True
-        self.running = False
-        self._is_connected_status = False
-        if self.ser and self.ser.is_open:
-            try:
-                self.ser.close()
-            except:
-                pass
-        self.connection_status_changed.emit(False, "Controller Disconnected - Waiting for reconnect...")
-        self.controller_disconnected.emit()
-        threading.Thread(target=self._reconnect_loop, daemon=True).start()
+        with self._reconnect_lock:
+            if self.reconnecting:
+                return
+            self.reconnecting = True
+            
+            self.running = False
+            self._is_connected_status = False
+            if self.ser and self.ser.is_open:
+                try:
+                    self.ser.close()
+                except:
+                    pass
+            
+            self.connection_status_changed.emit(False, "Controller Disconnected - Waiting for reconnect...")
+            self.controller_disconnected.emit()
+            threading.Thread(target=self._reconnect_loop, daemon=True).start()
 
     def _reconnect_loop(self):
         logger.info("Auto-reconnect loop started...")

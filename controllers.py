@@ -83,24 +83,29 @@ class ErrorManager(QObject):
 
 
 # =========================================================
-# PRESET POSITION CONTROLLER — Load/Unload state machine
+# PRESET POSITION CONTROLLER — Multi-Preset Load / Unload
 # =========================================================
 class PresetPositionController(QObject):
-    """Manages preset position (Load/Unload) logic and config persistence."""
+    """Manages preset position (Multiple Named Load Presets / Unload) logic and config persistence."""
 
     motor_direction_request = Signal(int)    # 1 / -1 / 0
+    presets_updated = Signal()
 
     POSITIONS_CONFIG_FILE = os.path.join(get_user_config_dir(), "preset_positions.json")
+    MAX_LOAD_PRESETS = 10
 
     def __init__(self, serial_handler, uni_control, main_window):
         super().__init__(main_window)
         self._serial = serial_handler
         self._uni    = uni_control
         self._mw     = main_window
+        if self._uni:
+            self._uni.controller = self
 
         self._raw_encoder_pos      = 0
 
-        self._load_pos             = None
+        self._load_presets         = []      # List of dicts: [{"id": str, "name": str, "pulses": int, "mm": float}]
+        self._selected_load_id     = None
         self._unload_pos           = None
         
         self._travel_active        = False
@@ -115,73 +120,183 @@ class PresetPositionController(QObject):
         self._timer.timeout.connect(self._travel_loop)
 
         self._load_config()
-        self._uni.update_load_label(self._load_pos)
-        self._uni.update_unload_label(self._unload_pos)
+        self._sync_ui()
 
     def _load_config(self):
         try:
             if os.path.exists(self.POSITIONS_CONFIG_FILE):
                 with open(self.POSITIONS_CONFIG_FILE, 'r') as f:
                     data = json.load(f)
-                    self._load_pos   = data.get("load_position")
+                    
+                    # 1. Load Presets (with legacy migration support)
+                    raw_presets = data.get("load_positions")
+                    if isinstance(raw_presets, list):
+                        self._load_presets = raw_presets
+                        for p in self._load_presets:
+                            if "cm" not in p:
+                                p["cm"] = round(self.pulses_to_cm(p.get("pulses", 0)), 4)
+                            if "mm" not in p:
+                                p["mm"] = round(self.pulses_to_mm(p.get("pulses", 0)), 4)
+                    elif data.get("load_position") is not None:
+                        # Migrate legacy single load position
+                        legacy_p = int(data.get("load_position"))
+                        self._load_presets = [{
+                            "id": "load_default",
+                            "name": "Default Load",
+                            "pulses": legacy_p,
+                            "cm": round(self.pulses_to_cm(legacy_p), 4),
+                            "mm": round(self.pulses_to_mm(legacy_p), 4)
+                        }]
+                    else:
+                        self._load_presets = []
+
+                    # 2. Selected preset ID
+                    self._selected_load_id = data.get("selected_load_id")
+                    if self._load_presets:
+                        valid_ids = [p["id"] for p in self._load_presets]
+                        if self._selected_load_id not in valid_ids:
+                            self._selected_load_id = valid_ids[0]
+                    else:
+                        self._selected_load_id = None
+
+                    # 3. Unload position
                     self._unload_pos = data.get("unload_position")
-                    logger.info(f"Loaded presets: Load={self._load_pos}, Unload={self._unload_pos}")
+                    logger.info("Loaded presets: %d load presets, Unload=%s", len(self._load_presets), self._unload_pos)
         except (json.JSONDecodeError, IOError) as e:
             logger.warning("Could not load preset config: %s", e)
-            self._load_pos = None
+            self._load_presets = []
+            self._selected_load_id = None
             self._unload_pos = None
 
     def _save_config(self):
         try:
+            active_p = self.get_selected_load_preset()
+            legacy_load_pos = active_p["pulses"] if active_p else None
             with open(self.POSITIONS_CONFIG_FILE, 'w') as f:
                 json.dump({
-                    "load_position": self._load_pos,
-                    "unload_position": self._unload_pos
-                }, f)
-            logger.info("Saved preset positions.")
+                    "load_positions": self._load_presets,
+                    "selected_load_id": self._selected_load_id,
+                    "unload_position": self._unload_pos,
+                    "load_position": legacy_load_pos
+                }, f, indent=2)
+            logger.info("Saved preset positions (%d load presets).", len(self._load_presets))
         except IOError as e:
             logger.error("Could not save preset config: %s", e)
+
+    def _sync_ui(self):
+        if hasattr(self._uni, "update_presets_ui"):
+            self._uni.update_presets_ui(
+                load_presets=self._load_presets,
+                selected_id=self._selected_load_id,
+                unload_pos=self._unload_pos
+            )
 
     @property
     def current_position(self):
         return self._raw_encoder_pos
 
     @staticmethod
+    def pulses_to_cm(pulses):
+        """Convert encoder pulses to cm: (pulses/10000) * 0.2."""
+        return (pulses / 10000.0) * 0.2
+
+    @staticmethod
+    def cm_to_pulses(cm):
+        """Convert cm to encoder pulses: (cm / 0.2) * 10000."""
+        return int(round((cm / 0.2) * 10000.0))
+
+    @staticmethod
     def pulses_to_mm(pulses):
         """Convert encoder pulses to mm: (pulses/10000) * 2.0."""
         return (pulses / 10000.0) * 2.0
+
+    @staticmethod
+    def mm_to_pulses(mm):
+        """Convert mm to encoder pulses: (mm / 2.0) * 10000."""
+        return int(round((mm / 2.0) * 10000.0))
 
     @Slot(int)
     def on_encoder_updated(self, raw_pos):
         self._raw_encoder_pos = raw_pos
 
-    def set_load_pos(self):
-        self._load_pos = self.current_position
-        self._save_config()
-        self._uni.update_load_label(self._load_pos)
-        mm = self.pulses_to_mm(self._load_pos)
-        QMessageBox.information(self._mw, "Load Position Set", f"Load position saved!\n{mm:.4f} mm ({self._load_pos:,} pulses)")
+    # --- Multiple Load Presets API ---
+    def get_load_presets(self):
+        return [dict(p) for p in self._load_presets]
 
+    def get_selected_load_id(self):
+        return self._selected_load_id
+
+    def get_selected_load_preset(self):
+        for p in self._load_presets:
+            if p["id"] == self._selected_load_id:
+                return p
+        if self._load_presets:
+            return self._load_presets[0]
+        return None
+
+    def set_selected_load_id(self, preset_id):
+        if self._selected_load_id != preset_id:
+            self._selected_load_id = preset_id
+            self._save_config()
+            self._sync_ui()
+
+    def add_load_preset(self, name: str, pulses: int) -> tuple[bool, str]:
+        if len(self._load_presets) >= self.MAX_LOAD_PRESETS:
+            return False, f"Maximum limit of {self.MAX_LOAD_PRESETS} presets reached. Please delete an unused preset first."
+        
+        clean_name = name.strip() if name else ""
+        if not clean_name:
+            clean_name = f"Load Pos {len(self._load_presets) + 1}"
+            
+        preset_id = f"pos_{int(time.time() * 1000)}"
+        cm_val = round(self.pulses_to_cm(pulses), 4)
+        mm_val = round(self.pulses_to_mm(pulses), 4)
+        new_preset = {
+            "id": preset_id,
+            "name": clean_name,
+            "pulses": int(pulses),
+            "cm": cm_val,
+            "mm": mm_val
+        }
+        self._load_presets.append(new_preset)
+        self._selected_load_id = preset_id
+        self._save_config()
+        self._sync_ui()
+        self.presets_updated.emit()
+        return True, "Preset added successfully."
+
+    def delete_load_preset(self, preset_id: str) -> bool:
+        initial_len = len(self._load_presets)
+        self._load_presets = [p for p in self._load_presets if p["id"] != preset_id]
+        if len(self._load_presets) < initial_len:
+            if self._selected_load_id == preset_id:
+                self._selected_load_id = self._load_presets[0]["id"] if self._load_presets else None
+            self._save_config()
+            self._sync_ui()
+            self.presets_updated.emit()
+            return True
+        return False
+
+    def rename_load_preset(self, preset_id: str, new_name: str) -> bool:
+        clean_name = new_name.strip() if new_name else ""
+        if not clean_name:
+            return False
+        for p in self._load_presets:
+            if p["id"] == preset_id:
+                p["name"] = clean_name
+                self._save_config()
+                self._sync_ui()
+                self.presets_updated.emit()
+                return True
+        return False
+
+    # --- Unload Position API ---
     def set_unload_pos(self):
         self._unload_pos = self.current_position
         self._save_config()
-        self._uni.update_unload_label(self._unload_pos)
-        mm = self.pulses_to_mm(self._unload_pos)
-        QMessageBox.information(self._mw, "Unload Position Set", f"Unload position saved!\n{mm:.4f} mm ({self._unload_pos:,} pulses)")
-
-    def clear_load_pos(self):
-        if self._load_pos is None:
-            QMessageBox.information(self._mw, "No Load Position", "No load position is currently set.")
-            return
-        reply = QMessageBox.question(
-            self._mw, "Clear Load Position", "Clear the saved load position?",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
-        )
-        if reply == QMessageBox.Yes:
-            self._load_pos = None
-            self._save_config()
-            self._uni.update_load_label(None)
-            logger.info("Load position CLEARED")
+        self._sync_ui()
+        cm = self.pulses_to_cm(self._unload_pos)
+        QMessageBox.information(self._mw, "Unload Position Set", f"Unload position saved!\n{cm:.2f} cm ({self._unload_pos:,} pulses)")
 
     def clear_unload_pos(self):
         if self._unload_pos is None:
@@ -194,24 +309,30 @@ class PresetPositionController(QObject):
         if reply == QMessageBox.Yes:
             self._unload_pos = None
             self._save_config()
-            self._uni.update_unload_label(None)
+            self._sync_ui()
             logger.info("Unload position CLEARED")
 
+    # --- Travel Logic ---
     def start_travel_to(self, target_type, rpm):
         if target_type == "load":
-            target = self._load_pos
-            name = "Load"
+            preset = self.get_selected_load_preset()
+            if not preset:
+                QMessageBox.warning(self._mw, "No Load Position", "No load position is selected. Use 'Manage Load Positions' to configure positions.")
+                return
+            target = preset["pulses"]
+            name = preset["name"]
         else:
             target = self._unload_pos
             name = "Unload"
 
         if target is None:
-            QMessageBox.warning(self._mw, f"No {name} Position", f"Set a {name} position first.")
+            QMessageBox.warning(self._mw, f"No {name} Position", f"Set an {name} position first.")
             return
 
+        target_cm = self.pulses_to_cm(target)
         reply = QMessageBox.question(
             self._mw, f"Confirm Travel to {name}",
-            f"Are you sure you want to travel to the {name} Position?\nPlease ensure the path is clear.",
+            f"Are you sure you want to travel to '{name}'?\n\nTarget: {target_cm:.2f} cm ({target:,} pulses)\n\nPlease ensure the crosshead path is clear.",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No
         )
         if reply != QMessageBox.Yes:
@@ -228,20 +349,19 @@ class PresetPositionController(QObject):
         self._last_travel_cmd = ""
         self._travel_initial_diff_sign = None
 
-        self._uni.lbl_live_encoder.setVisible(True)
-        self._uni.lbl_status.setText("Status: TRAVELING")
-        self._uni.lbl_status.setStyleSheet("background-color: #f39c12; color: white; padding: 8px; border-radius: 4px; font-weight: bold;")
+        if hasattr(self._uni, "set_travel_active_state"):
+            self._uni.set_travel_active_state(True)
+
         self._timer.start()
-        logger.info(f"Travel STARTED to {name} — target: %d, speed: %d RPM", target, self._travel_rpm)
+        logger.info("Travel STARTED to %s — target: %d, speed: %d RPM", name, target, self._travel_rpm)
 
     def stop_travel(self):
         self._travel_active = False
         self._timer.stop()
         self._serial.send_cmd("STOP")
         self.motor_direction_request.emit(0)
-        self._uni.lbl_live_encoder.setVisible(False)
-        self._uni.lbl_status.setText("Status: IDLE")
-        self._uni.lbl_status.setStyleSheet("background-color: #bdc3c7; color: #2c3e50; padding: 8px; border-radius: 4px; font-weight: bold;")
+        if hasattr(self._uni, "set_travel_active_state"):
+            self._uni.set_travel_active_state(False)
         logger.info("Travel STOPPED")
 
     def _travel_loop(self):
@@ -250,13 +370,14 @@ class PresetPositionController(QObject):
         curr   = self.current_position
         target = self._target_pos
         diff   = curr - target
-        curr_mm = self.pulses_to_mm(curr)
-        self._uni.lbl_live_encoder.setText(f"Live: {curr_mm:.4f} mm ({curr:,} pulses)")
+        curr_cm = self.pulses_to_cm(curr)
+        if hasattr(self._uni, "lbl_live_encoder"):
+            self._uni.lbl_live_encoder.setText(f"Live: {curr_cm:.2f} cm ({curr:,} pulses)")
 
-        # Deadband
+        # Deadband: 5000 pulses
         if abs(diff) <= 5000:
             self.stop_travel()
-            QMessageBox.information(self._mw, "Travel Complete", f"Reached {self._target_name} position!\n{curr_mm:.4f} mm ({curr:,} pulses)")
+            QMessageBox.information(self._mw, "Travel Complete", f"Reached {self._target_name} position!\n{curr_cm:.2f} cm ({curr:,} pulses)")
             return
 
         if curr < target:
@@ -275,12 +396,14 @@ class PresetPositionController(QObject):
             if (diff > 0) != self._travel_initial_diff_sign:
                 self.stop_travel()
                 if abs(diff) <= 5000:
-                    QMessageBox.information(self._mw, "Travel Complete", f"Reached {self._target_name} position!\n{curr_mm:.4f} mm ({curr:,} pulses)")
+                    QMessageBox.information(self._mw, "Travel Complete", f"Reached {self._target_name} position!\n{curr_cm:.2f} cm ({curr:,} pulses)")
                 else:
+                    overshoot_cm = self.pulses_to_cm(abs(diff))
                     QMessageBox.warning(
                         self._mw, "Travel Overshoot",
-                        f"Overshot {self._target_name} position by {abs(diff):,} pulses!\nThis exceeds the 5000-pulse deadband.\nTry a lower speed."
+                        f"Overshot {self._target_name} position by {overshoot_cm:.2f} cm ({abs(diff):,} pulses)!\nThis exceeds the 5000-pulse deadband.\nTry a lower speed."
                     )
+
 
 
 # =========================================================

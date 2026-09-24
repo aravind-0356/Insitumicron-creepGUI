@@ -103,7 +103,7 @@ def test_manual_override():
 
 
 def test_short_noisy_data():
-    print("[4/4] Testing robustness with small/noisy dataset...")
+    print("[4/5] Testing robustness with small/noisy dataset...")
     time_s = [i * 60.0 for i in range(12)]
     load_n = [500.0 + (i % 2) for i in range(12)]
     disp_mm = [0.1 + i * 0.005 for i in range(12)]
@@ -115,6 +115,39 @@ def test_short_noisy_data():
     print("  -> PASS")
 
 
+def test_negative_displacement_and_seating():
+    print("[5/5] Testing negative displacement progression & seating noise (Y >= 0 guarantee)...")
+    # Simulate a test that progresses in the negative direction (e.g. compression or inverted stroke)
+    # with an initial negative seating jitter: 0.0 -> -0.005 -> -0.05 -> -0.2 -> -1.0 mm
+    n_pts = 300
+    time_hr = np.linspace(0.0, 100.0, n_pts)
+    time_s = time_hr * 3600.0
+    
+    # Negative displacement curve (-0.015 %/hr rate)
+    steady_rate = 0.015
+    gauge = 50.0
+    disp_mm = -((steady_rate * time_hr + 0.1 * (1.0 - np.exp(-time_hr / 5.0))) / 100.0) * gauge
+    # Add a tiny seating dip at index 1
+    disp_mm[1] = -0.002
+    load_n = [500.0] * n_pts
+
+    engine = CreepAnalysisEngine()
+    res = engine.analyse(time_s.tolist(), load_n, disp_mm.tolist(), area_mm2=25.0, gauge_length_mm=gauge)
+
+    # 1. Guarantee every single point is Y >= 0
+    assert all(s >= 0.0 for s in res.strain_pct), f"Found negative strain: {min(res.strain_pct)}"
+    assert res.strain_pct[0] == 0.0, f"Expected start at 0.0, got {res.strain_pct[0]}"
+    
+    # 2. Guarantee steady-state rate is positive and accurately calculated
+    assert res.steady_state_rate_pct_per_hr > 0.012 and res.steady_state_rate_pct_per_hr < 0.018, \
+        f"Rate should be ~0.015, got {res.steady_state_rate_pct_per_hr}"
+    assert res.steady_state_r2 > 0.98, f"Expected high R², got {res.steady_state_r2}"
+    
+    # 3. Warning was recorded
+    assert any("negative direction" in w.lower() for w in res.warnings)
+    print(f"  -> PASS (Inverted Rate: {res.steady_state_rate_pct_per_hr:.4f} %/hr, Min Y: {min(res.strain_pct):.4f}%)")
+
+
 def run_all():
     print("=" * 60)
     print("RUNNING CREEP ANALYSIS ENGINE TEST SUITE")
@@ -123,8 +156,9 @@ def run_all():
     test_rupture_detection()
     test_manual_override()
     test_short_noisy_data()
+    test_negative_displacement_and_seating()
     print("=" * 60)
-    print("ALL CREEP ANALYSIS ENGINE TESTS PASSED [4/4]")
+    print("ALL CREEP ANALYSIS ENGINE TESTS PASSED [5/5]")
     print("=" * 60)
 
 

@@ -3,7 +3,8 @@ from functools import partial
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox,
     QGroupBox, QFormLayout, QGridLayout, QMessageBox, QSizePolicy, QStackedWidget,
-    QCheckBox, QFrame, QScrollArea, QButtonGroup
+    QCheckBox, QFrame, QScrollArea, QButtonGroup, QDialog, QTableWidget,
+    QTableWidgetItem, QHeaderView
 )
 from PySide6.QtCore import Qt, Signal, Slot, QTimer
 from PySide6.QtGui import QDoubleValidator, QIntValidator, QPixmap, QImage
@@ -26,6 +27,236 @@ class StyledCheckBox(QCheckBox):
         self.setCursor(Qt.PointingHandCursor)
 
 # =========================================================
+# PRESET MANAGER DIALOG
+# =========================================================
+class PresetManagerDialog(QDialog):
+    """
+    Modal dialog allowing operators to view, add, rename, and delete
+    named crosshead load position presets with industrial limit enforcement.
+    """
+    def __init__(self, parent, preset_controller):
+        super().__init__(parent)
+        self.controller = preset_controller
+        self.setWindowTitle("Manage Load Positions")
+        self.resize(1000, 750)
+        self.setMinimumWidth(820)
+        self.setMinimumHeight(650)
+        self.setModal(True)
+        self._init_ui()
+        self._load_table_data()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
+
+        # Header Title
+        lbl_title = QLabel("Saved Load Positions")
+        lbl_title.setStyleSheet(f"font-size: 22px; font-weight: bold; color: {PRIMARY_COLOR};")
+        layout.addWidget(lbl_title)
+
+        # Live Position Readout
+        curr_p = self.controller.current_position
+        curr_cm = self.controller.pulses_to_cm(curr_p)
+        self.lbl_live = QLabel(f"Live Load Position: {curr_cm:.2f} cm ({curr_p:,} pulses)")
+        self.lbl_live.setStyleSheet("font-weight: bold; color: #2c3e50;")
+        layout.addWidget(self.lbl_live)
+
+        # Count Indicator
+        self.lbl_count = QLabel("")
+        self.lbl_count.setStyleSheet("color: #7f8c8d; font-style: italic;")
+        layout.addWidget(self.lbl_count)
+
+        # Inline Tip Label
+        lbl_hint = QLabel("Tip: Double-click any position name to rename it directly.")
+        lbl_hint.setStyleSheet("font-style: italic; color: #7f8c8d; margin-top: 2px;")
+        layout.addWidget(lbl_hint)
+
+        # Presets Table
+        self.table = QTableWidget()
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels([
+            "Position Name",
+            "Target (cm)",
+            "Encoder Pulses",
+            "Action"
+        ])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Fixed)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Fixed)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Fixed)
+        self.table.setColumnWidth(1, 140)
+        self.table.setColumnWidth(2, 230)
+        self.table.setColumnWidth(3, 110)
+        self.table.verticalHeader().setDefaultSectionSize(48)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.setStyleSheet(f"""
+            QScrollBar:vertical {{
+                border: none;
+                background: #f1f2f6;
+                width: 12px;
+                margin: 0px;
+                border-radius: 6px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: #bdc3c7;
+                min-height: 30px;
+                border-radius: 6px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: #95a5a6;
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0px;
+                background: none;
+            }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                background: none;
+            }}
+            QTableWidget {{
+                border: 1px solid #bdc3c7;
+                border-radius: 6px;
+                gridline-color: #ecf0f1;
+            }}
+            QHeaderView::section {{
+                background-color: #f8f9fa;
+                color: {PRIMARY_COLOR};
+                font-weight: bold;
+                padding: 10px 8px;
+                border: 1px solid #dee2e6;
+            }}
+        """)
+        self.table.itemChanged.connect(self._on_table_item_changed)
+        layout.addWidget(self.table, stretch=1)
+
+        # Capture New Preset Section
+        grp_add = QGroupBox("Save Current Position")
+        add_lay = QHBoxLayout(grp_add)
+        add_lay.setContentsMargins(14, 16, 14, 14)
+        add_lay.setSpacing(12)
+
+        lbl_name = QLabel("Position Name:")
+        lbl_name.setStyleSheet("font-weight: bold; color: #2c3e50;")
+        add_lay.addWidget(lbl_name)
+
+        self.inp_name = QLineEdit()
+        self.inp_name.setPlaceholderText("e.g., 200 N Hold")
+        add_lay.addWidget(self.inp_name, stretch=1)
+
+        self.btn_save_live = QPushButton("Save Live Position")
+        self.btn_save_live.clicked.connect(self._on_save_live_clicked)
+        add_lay.addWidget(self.btn_save_live)
+
+        layout.addWidget(grp_add)
+
+        # Bottom Bar
+        bottom_bar = QHBoxLayout()
+        bottom_bar.addStretch()
+        self.btn_close = QPushButton("Close")
+        self.btn_close.setStyleSheet("background-color: #7f8c8d; color: white;")
+        self.btn_close.clicked.connect(self.accept)
+        bottom_bar.addWidget(self.btn_close)
+        layout.addLayout(bottom_bar)
+
+    def _load_table_data(self):
+        self.table.blockSignals(True)
+        presets = self.controller.get_load_presets()
+        max_p = self.controller.MAX_LOAD_PRESETS
+        self.lbl_count.setText(f"Stored Positions: {len(presets)} of {max_p} maximum allowed.")
+        can_add = len(presets) < max_p
+        self.btn_save_live.setEnabled(can_add)
+        self.inp_name.setEnabled(can_add)
+
+        self.table.setRowCount(len(presets))
+        for row, p in enumerate(presets):
+            # Name item (editable)
+            item_name = QTableWidgetItem(p["name"])
+            item_name.setData(Qt.UserRole, p["id"])
+            item_name.setToolTip("Double-click to rename preset")
+            item_name.setTextAlignment(Qt.AlignCenter)
+            self.table.setItem(row, 0, item_name)
+
+            # Position cm item (read-only)
+            cm_val = p.get('cm', self.controller.pulses_to_cm(p.get('pulses', 0)))
+            item_cm = QTableWidgetItem(f"{cm_val:.2f}")
+            item_cm.setFlags(item_cm.flags() & ~Qt.ItemIsEditable)
+            item_cm.setTextAlignment(Qt.AlignCenter)
+            self.table.setItem(row, 1, item_cm)
+
+            # Pulses item (read-only)
+            item_pls = QTableWidgetItem(f"{p['pulses']:,}")
+            item_pls.setFlags(item_pls.flags() & ~Qt.ItemIsEditable)
+            item_pls.setTextAlignment(Qt.AlignCenter)
+            self.table.setItem(row, 2, item_pls)
+
+            # Delete button
+            btn_del = QPushButton("Delete")
+            btn_del.setCursor(Qt.PointingHandCursor)
+            btn_del.setStyleSheet("""
+                QPushButton {
+                    background-color: #e74c3c; 
+                    color: white; 
+                    padding: 4px 12px; 
+                    font-size: 14px; 
+                    border-radius: 4px;
+                }
+                QPushButton:hover {
+                    background-color: #c0392b;
+                }
+            """)
+            p_id = p["id"]
+            p_name = p["name"]
+            btn_del.clicked.connect(partial(self._on_delete_clicked, p_id, p_name))
+            
+            cell_widget = QWidget()
+            cell_layout = QHBoxLayout(cell_widget)
+            cell_layout.setContentsMargins(5, 5, 5, 5)
+            cell_layout.setAlignment(Qt.AlignCenter)
+            cell_layout.addWidget(btn_del)
+            self.table.setCellWidget(row, 3, cell_widget)
+
+        self.table.blockSignals(False)
+
+    def _on_save_live_clicked(self):
+        # 1. Check if motor is running
+        if hasattr(self.controller._uni, "lbl_status") and "RUNNING" in self.controller._uni.lbl_status.text():
+            QMessageBox.warning(self, "Motor Moving", "Cannot save position while the motor is moving. Please stop the motor first.")
+            return
+
+        # 2. Check limit
+        if len(self.controller.get_load_presets()) >= self.controller.MAX_LOAD_PRESETS:
+            QMessageBox.warning(self, "Limit Reached", f"Maximum limit of {self.controller.MAX_LOAD_PRESETS} positions reached.\nPlease delete an unused position before creating a new one.")
+            return
+
+        name = self.inp_name.text().strip()
+        curr_pulses = self.controller.current_position
+        success, msg = self.controller.add_load_preset(name, curr_pulses)
+        if success:
+            self.inp_name.clear()
+            self._load_table_data()
+        else:
+            QMessageBox.warning(self, "Cannot Add Position", msg)
+
+    def _on_delete_clicked(self, preset_id, preset_name):
+        reply = QMessageBox.question(
+            self, "Delete Position",
+            f"Are you sure you want to delete position '{preset_name}'?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            self.controller.delete_load_preset(preset_id)
+            self._load_table_data()
+
+    def _on_table_item_changed(self, item):
+        if item.column() == 0:
+            preset_id = item.data(Qt.UserRole)
+            new_name = item.text().strip()
+            if preset_id and new_name:
+                self.controller.rename_load_preset(preset_id, new_name)
+
+
+# =========================================================
 # UNIAXIAL MOTOR CONTROL PANEL
 # =========================================================
 class UniaxialMotorControlPanel(QWidget):
@@ -42,17 +273,18 @@ class UniaxialMotorControlPanel(QWidget):
     def __init__(self, serial_handler):
         super().__init__()
         self.serial = serial_handler
+        self.controller = None
         self.init_ui()
 
     def init_ui(self):
         layout = QVBoxLayout()
         layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(12)
+        layout.setSpacing(14)
 
         # --- Manual Actuation ---
         grp_cont = QGroupBox("Manual Actuation - Crosshead Jog")
         cont_lay = QVBoxLayout(grp_cont)
-        cont_lay.setContentsMargins(8, 12, 8, 8)
+        cont_lay.setContentsMargins(10, 16, 10, 12)
         cont_lay.setSpacing(10)
 
         row_vel = QHBoxLayout()
@@ -70,69 +302,95 @@ class UniaxialMotorControlPanel(QWidget):
         self.btn_stop = QPushButton("Stop Motor")
         self.btn_stop.setStyleSheet("background-color: #c0392b;")
 
-        row_btns.addWidget(self.btn_start)
-        row_btns.addWidget(self.btn_stop)
-        cont_lay.addLayout(row_btns)
-
         self.lbl_status = QLabel("Status: IDLE")
         self.lbl_status.setAlignment(Qt.AlignCenter)
         self.lbl_status.setStyleSheet(
-            "background-color: #bdc3c7; color: #2c3e50; padding: 8px; border-radius: 4px; font-weight: bold;"
+            "background-color: #bdc3c7; color: #2c3e50; padding: 10px; border-radius: 6px; font-weight: bold;"
         )
-        cont_lay.addWidget(self.lbl_status)
+
+        row_btns.addWidget(self.btn_start, 1)
+        row_btns.addWidget(self.btn_stop, 1)
+        row_btns.addWidget(self.lbl_status, 1)
+        cont_lay.addLayout(row_btns)
+
         layout.addWidget(grp_cont)
 
         # --- Automatic Actuation ---
         grp_auto = QGroupBox("Automatic Actuation - Targeted Positioning")
         auto_lay = QVBoxLayout(grp_auto)
-        auto_lay.setContentsMargins(8, 12, 8, 8)
-        auto_lay.setSpacing(8)
+        auto_lay.setContentsMargins(10, 16, 10, 14)
+        auto_lay.setSpacing(12)
 
         presets_row = QHBoxLayout()
-        presets_row.setSpacing(8)
+        presets_row.setSpacing(12)
 
-        # 1) Load Position
-        grp_load = QGroupBox("Load Position")
+        # 1) Load Positions
+        grp_load = QGroupBox("Load Positions")
         load_lay = QVBoxLayout(grp_load)
-        load_lay.setContentsMargins(8, 8, 8, 8)
-        load_lay.setSpacing(6)
+        load_lay.setContentsMargins(10, 14, 10, 12)
+        load_lay.setSpacing(8)
 
-        self.lbl_load_pos = QLabel("Not Set")
-        self.lbl_load_pos.setStyleSheet("font-weight: bold; color: #2c3e50;")
-        load_lay.addWidget(self.lbl_load_pos)
+        lbl_load_title = QLabel("Target Position:")
+        lbl_load_title.setStyleSheet("font-weight: bold; color: #2c3e50;")
+        load_lay.addWidget(lbl_load_title)
 
-        self.btn_set_load = QPushButton("Set")
-        self.btn_clear_load = QPushButton("Clear")
-        self.btn_clear_load.setStyleSheet("background-color: #7f8c8d;")
-        load_lay.addWidget(self.btn_set_load)
-        load_lay.addWidget(self.btn_clear_load)
+        self.combo_load_presets = QComboBox()
+        self.combo_load_presets.setStyleSheet("font-weight: bold;")
+        self.combo_load_presets.currentIndexChanged.connect(self._on_combo_preset_changed)
+        load_lay.addWidget(self.combo_load_presets)
+
+        self.lbl_load_details = QLabel("Target: Not Set")
+        self.lbl_load_details.setStyleSheet(f"font-weight: bold; color: {PRIMARY_COLOR}; padding: 4px 0;")
+        load_lay.addWidget(self.lbl_load_details)
+
+        self.btn_manage_presets = QPushButton("Manage Load Positions")
+        self.btn_manage_presets.clicked.connect(self.open_preset_manager)
+        load_lay.addWidget(self.btn_manage_presets)
+
         presets_row.addWidget(grp_load, 3)
 
         # 2) Unload Position
         grp_unload = QGroupBox("Unload Position")
         unload_lay = QVBoxLayout(grp_unload)
-        unload_lay.setContentsMargins(8, 8, 8, 8)
-        unload_lay.setSpacing(6)
+        unload_lay.setContentsMargins(10, 14, 10, 12)
+        unload_lay.setSpacing(8)
+
+        lbl_unload_title = QLabel("Unload Position:")
+        lbl_unload_title.setStyleSheet("font-weight: bold; color: #2c3e50;")
+        unload_lay.addWidget(lbl_unload_title)
 
         self.lbl_unload_pos = QLabel("Not Set")
-        self.lbl_unload_pos.setStyleSheet("font-weight: bold; color: #2c3e50;")
+        self.lbl_unload_pos.setStyleSheet(
+            "background-color: #f8f9fa; border: 1px solid #bdc3c7; border-radius: 6px; "
+            "color: #2c3e50; font-weight: bold; padding: 10px 12px; min-height: 22px;"
+        )
         unload_lay.addWidget(self.lbl_unload_pos)
 
-        self.btn_set_unload = QPushButton("Set")
+        self.lbl_unload_status = QLabel("Reference: Baseline")
+        self.lbl_unload_status.setStyleSheet("font-weight: bold; color: #7f8c8d; padding: 4px 0;")
+        unload_lay.addWidget(self.lbl_unload_status)
+
+        btn_unload_row = QHBoxLayout()
+        btn_unload_row.setSpacing(8)
+        self.btn_set_unload = QPushButton("Set Live")
         self.btn_clear_unload = QPushButton("Clear")
-        self.btn_clear_unload.setStyleSheet("background-color: #7f8c8d;")
-        unload_lay.addWidget(self.btn_set_unload)
-        unload_lay.addWidget(self.btn_clear_unload)
+        self.btn_clear_unload.setStyleSheet("background-color: #7f8c8d; color: white;")
+        btn_unload_row.addWidget(self.btn_set_unload)
+        btn_unload_row.addWidget(self.btn_clear_unload)
+        unload_lay.addLayout(btn_unload_row)
+
         presets_row.addWidget(grp_unload, 3)
 
         # 3) Travel
         grp_travel = QGroupBox("Auto Travel")
         travel_lay = QVBoxLayout(grp_travel)
-        travel_lay.setContentsMargins(8, 8, 8, 8)
-        travel_lay.setSpacing(6)
+        travel_lay.setContentsMargins(10, 14, 10, 12)
+        travel_lay.setSpacing(8)
 
         speed_row = QHBoxLayout()
-        speed_row.addWidget(QLabel("Speed (mm/s):"))
+        lbl_speed = QLabel("Speed (mm/s):")
+        lbl_speed.setStyleSheet("font-weight: bold; color: #2c3e50;")
+        speed_row.addWidget(lbl_speed)
         self.travel_speed = QLineEdit("2.0")
         self.travel_speed.setPlaceholderText("mm/s")
         self.travel_speed.setValidator(QDoubleValidator())
@@ -140,18 +398,19 @@ class UniaxialMotorControlPanel(QWidget):
         travel_lay.addLayout(speed_row)
 
         travel_btns = QHBoxLayout()
+        travel_btns.setSpacing(8)
         self.btn_go_load = QPushButton("Go to Load")
         self.btn_go_unload = QPushButton("Go to Unload")
         travel_btns.addWidget(self.btn_go_load)
         travel_btns.addWidget(self.btn_go_unload)
         travel_lay.addLayout(travel_btns)
 
-        self.btn_cancel_travel = QPushButton("Cancel")
-        self.btn_cancel_travel.setStyleSheet("background-color: #c0392b;")
+        self.btn_cancel_travel = QPushButton("Cancel Travel")
+        self.btn_cancel_travel.setStyleSheet("background-color: #c0392b; color: white;")
         travel_lay.addWidget(self.btn_cancel_travel)
 
         self.lbl_live_encoder = QLabel("")
-        self.lbl_live_encoder.setStyleSheet("font-weight: bold; color: #7f8c8d;")
+        self.lbl_live_encoder.setStyleSheet("font-weight: bold; color: #7f8c8d; padding-top: 2px;")
         self.lbl_live_encoder.setVisible(False)
         travel_lay.addWidget(self.lbl_live_encoder)
 
@@ -165,9 +424,7 @@ class UniaxialMotorControlPanel(QWidget):
 
         self.btn_start.clicked.connect(self.send_start)
         self.btn_stop.clicked.connect(self.send_stop)
-        self.btn_set_load.clicked.connect(self.set_load_pos.emit)
         self.btn_set_unload.clicked.connect(self.set_unload_pos.emit)
-        self.btn_clear_load.clicked.connect(self.clear_load_pos.emit)
         self.btn_clear_unload.clicked.connect(self.clear_unload_pos.emit)
         self.btn_go_load.clicked.connect(self.go_load_clicked)
         self.btn_go_unload.clicked.connect(self.go_unload_clicked)
@@ -180,6 +437,16 @@ class UniaxialMotorControlPanel(QWidget):
     def _mm_sec_to_rpm(mm_sec):
         """Convert mm/sec to RPM: rpm = mm_sec * 30."""
         return int(round(mm_sec * 30.0))
+
+    @staticmethod
+    def pulses_to_cm(pulses):
+        """Convert encoder pulses to cm: (pulses / 10000.0) * 0.2."""
+        return (pulses / 10000.0) * 0.2
+
+    @staticmethod
+    def cm_to_pulses(cm):
+        """Convert cm to encoder pulses: (cm / 0.2) * 10000."""
+        return int(round((cm / 0.2) * 10000.0))
 
     def send_start(self):
         if not self.serial.is_connected():
@@ -197,7 +464,7 @@ class UniaxialMotorControlPanel(QWidget):
             self.serial.send_cmd(f"VEL:{rpm}")
             self.serial.send_cmd("START")
             self.lbl_status.setText("Status: RUNNING")
-            self.lbl_status.setStyleSheet("background-color: #2ecc71; color: white; padding: 8px; border-radius: 4px; font-weight: bold;")
+            self.lbl_status.setStyleSheet("background-color: #2ecc71; color: white; padding: 10px; border-radius: 6px; font-weight: bold;")
             logger.info("Motor STARTED at %.3f mm/sec (%d RPM)", mm_sec, rpm)
             self.motor_started.emit()
         except ValueError:
@@ -231,7 +498,7 @@ class UniaxialMotorControlPanel(QWidget):
         self.motor_direction_changed.emit(0)
         self.serial.send_cmd("STOP")
         self.lbl_status.setText("Status: IDLE")
-        self.lbl_status.setStyleSheet("background-color: #bdc3c7; color: #2c3e50; padding: 8px; border-radius: 4px; font-weight: bold;")
+        self.lbl_status.setStyleSheet("background-color: #bdc3c7; color: #2c3e50; padding: 10px; border-radius: 6px; font-weight: bold;")
         logger.info("Motor STOPPED")
 
     def _get_travel_rpm(self):
@@ -263,19 +530,101 @@ class UniaxialMotorControlPanel(QWidget):
         if rpm is not None:
             self.go_unload_pos.emit(rpm)
 
-    def update_load_label(self, pos):
-        if pos is None:
-            self.lbl_load_pos.setText("Not Set")
+    def open_preset_manager(self):
+        if self.controller:
+            dlg = PresetManagerDialog(self, self.controller)
+            dlg.exec()
+
+    def _on_combo_preset_changed(self, index):
+        preset_id = self.combo_load_presets.currentData()
+        if preset_id and self.controller:
+            self.controller.set_selected_load_id(preset_id)
+
+    def update_presets_ui(self, load_presets, selected_id, unload_pos):
+        self.combo_load_presets.blockSignals(True)
+        self.combo_load_presets.clear()
+        
+        if load_presets:
+            self.combo_load_presets.setEnabled(True)
+            active_index = 0
+            for i, p in enumerate(load_presets):
+                cm_val = p.get('cm', self.pulses_to_cm(p['pulses']))
+                label_txt = f"{p['name']} ({cm_val:.2f} cm)"
+                self.combo_load_presets.addItem(label_txt, p['id'])
+                if p['id'] == selected_id:
+                    active_index = i
+            self.combo_load_presets.setCurrentIndex(active_index)
+            
+            selected_preset = load_presets[active_index]
+            selected_cm = selected_preset.get('cm', self.pulses_to_cm(selected_preset['pulses']))
+            self.lbl_load_details.setText(f"Target: {selected_cm:.2f} cm ({selected_preset['pulses']:,} pls)")
+            self.btn_go_load.setText(f"Go to [{selected_preset['name']}]")
+            self.btn_go_load.setEnabled(True)
         else:
-            mm = (pos / 10000.0) * 2.0
-            self.lbl_load_pos.setText(f"{mm:.4f} mm ({pos:,} pulses)")
+            self.combo_load_presets.addItem("No Positions Saved", None)
+            self.combo_load_presets.setEnabled(False)
+            self.lbl_load_details.setText("Target: Not Set")
+            self.btn_go_load.setText("Go to Load")
+            self.btn_go_load.setEnabled(False)
+            
+        self.combo_load_presets.blockSignals(False)
+        
+        # Unload
+        if unload_pos is None:
+            self.lbl_unload_pos.setText("Not Set")
+            self.lbl_unload_pos.setStyleSheet(
+                "background-color: #f8f9fa; border: 1px solid #bdc3c7; border-radius: 6px; "
+                "color: #7f8c8d; font-weight: bold; padding: 10px 12px; min-height: 22px;"
+            )
+            self.lbl_unload_status.setText("Status: Not Set")
+            self.btn_go_unload.setEnabled(False)
+        else:
+            cm = self.pulses_to_cm(unload_pos)
+            self.lbl_unload_pos.setText(f"{cm:.2f} cm ({unload_pos:,} pls)")
+            self.lbl_unload_pos.setStyleSheet(
+                f"background-color: #f8f9fa; border: 1px solid #bdc3c7; border-radius: 6px; "
+                f"color: {PRIMARY_COLOR}; font-weight: bold; padding: 10px 12px; min-height: 22px;"
+            )
+            self.lbl_unload_status.setText("Status: Unload Position Set")
+            self.btn_go_unload.setEnabled(True)
+
+    def update_load_label(self, pos):
+        """Legacy helper for backward compatibility."""
+        if hasattr(self, "lbl_load_details"):
+            if pos is None:
+                self.lbl_load_details.setText("Target: Not Set")
+            else:
+                cm = self.pulses_to_cm(pos)
+                self.lbl_load_details.setText(f"Target: {cm:.2f} cm ({pos:,} pls)")
 
     def update_unload_label(self, pos):
+        """Legacy helper for backward compatibility."""
         if pos is None:
             self.lbl_unload_pos.setText("Not Set")
+            self.btn_go_unload.setEnabled(False)
         else:
-            mm = (pos / 10000.0) * 2.0
-            self.lbl_unload_pos.setText(f"{mm:.4f} mm ({pos:,} pulses)")
+            cm = self.pulses_to_cm(pos)
+            self.lbl_unload_pos.setText(f"{cm:.2f} cm ({pos:,} pls)")
+            self.btn_go_unload.setEnabled(True)
+
+    def set_travel_active_state(self, is_traveling: bool):
+        self.btn_manage_presets.setEnabled(not is_traveling)
+        has_presets = (self.combo_load_presets.count() > 0 and self.combo_load_presets.currentData() is not None)
+        self.combo_load_presets.setEnabled(not is_traveling and has_presets)
+        self.btn_set_unload.setEnabled(not is_traveling)
+        self.btn_clear_unload.setEnabled(not is_traveling)
+        self.btn_go_load.setEnabled(not is_traveling and has_presets)
+        has_unload = hasattr(self, "controller") and self.controller and self.controller._unload_pos is not None
+        self.btn_go_unload.setEnabled(not is_traveling and has_unload)
+        self.btn_cancel_travel.setEnabled(is_traveling)
+        self.lbl_live_encoder.setVisible(is_traveling)
+        if is_traveling:
+            self.lbl_status.setText("Status: TRAVELING")
+            self.lbl_status.setStyleSheet("background-color: #f39c12; color: white; padding: 10px; border-radius: 6px; font-weight: bold;")
+        else:
+            self.lbl_status.setText("Status: IDLE")
+            self.lbl_status.setStyleSheet("background-color: #bdc3c7; color: #2c3e50; padding: 10px; border-radius: 6px; font-weight: bold;")
+
 
 
 # =========================================================
@@ -446,13 +795,13 @@ class SensorDisplayPanel(QWidget):
 
     def update_sensors(self, load_n, disp_mm, max_disp=0.0):
         self.lbl_load.setText(f"{load_n:.0f} N")
-        self.lbl_disp.setText(f"{disp_mm:.3f} mm")
+        self.lbl_disp.setText(f"{disp_mm:.2f} mm")
         if hasattr(self, 'lbl_max_disp_val'):
-            self.lbl_max_disp_val.setText(f"{max_disp:.4f} mm")
+            self.lbl_max_disp_val.setText(f"{max_disp:.2f} mm")
 
     def update_offsets(self, load_off, disp_off):
         self.lbl_load_zero.setText(f"(Zero: {load_off:.0f})")
-        self.lbl_disp_zero.setText(f"(Zero: {disp_off:.3f})")
+        self.lbl_disp_zero.setText(f"(Zero: {disp_off:.2f})")
 
 
 # =========================================================
